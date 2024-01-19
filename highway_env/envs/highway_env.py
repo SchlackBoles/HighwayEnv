@@ -82,6 +82,8 @@ class HighwayEnv(AbstractEnv):
             vehicle = self.action_type.vehicle_class(
                 self.road, vehicle.position, vehicle.heading, vehicle.speed
             )
+            # Store the initial lane index of the vehicle
+            vehicle.previous_lane_index = vehicle.lane_index
             self.controlled_vehicles.append(vehicle)
             self.road.vehicles.append(vehicle)
 
@@ -92,27 +94,38 @@ class HighwayEnv(AbstractEnv):
                 vehicle.randomize_behavior()
                 self.road.vehicles.append(vehicle)
 
+
     def _reward(self, action: Action) -> float:
         """
         The reward is defined to foster driving at high speed, on the rightmost lanes, and to avoid collisions.
+        Now includes a reward or penalty for lane changes.
         :param action: the last action performed
         :return: the corresponding reward
         """
+        # Get the basic rewards, which now includes the lane change reward
         rewards = self._rewards(action)
+
+        # Sum up the rewards
         reward = sum(
             self.config.get(name, 0) * reward for name, reward in rewards.items()
         )
+
+        # Normalize the reward if required
         if self.config["normalize_reward"]:
             reward = utils.lmap(
                 reward,
                 [
                     self.config["collision_reward"],
-                    self.config["high_speed_reward"] + self.config["right_lane_reward"],
+                    self.config["high_speed_reward"] + self.config["right_lane_reward"] + self.config.get("lane_change_reward", 0)
                 ],
                 [0, 1],
             )
-        reward *= rewards["on_road_reward"]
+
+        # Adjust reward based on whether the vehicle is on the road
+        reward *= rewards.get("on_road_reward", 1)
+
         return reward
+
 
     def _rewards(self, action: Action) -> Dict[Text, float]:
         neighbours = self.road.network.all_side_lanes(self.vehicle.lane_index)
@@ -126,12 +139,20 @@ class HighwayEnv(AbstractEnv):
         scaled_speed = utils.lmap(
             forward_speed, self.config["reward_speed_range"], [0, 1]
         )
+
+        # Check if there has been a lane change by comparing the current lane index with the previous one
+        lane_change = self.vehicle.lane_index != self.vehicle.previous_lane_index
+        # Update the previous_lane_index to the current lane index for the next step
+        self.vehicle.previous_lane_index = self.vehicle.lane_index
+
         return {
             "collision_reward": float(self.vehicle.crashed),
             "right_lane_reward": lane / max(len(neighbours) - 1, 1),
             "high_speed_reward": np.clip(scaled_speed, 0, 1),
             "on_road_reward": float(self.vehicle.on_road),
+            "lane_change_reward": float(lane_change) * self.config["lane_change_reward"],
         }
+
 
     def _is_terminated(self) -> bool:
         """The episode is over if the ego vehicle crashed."""
